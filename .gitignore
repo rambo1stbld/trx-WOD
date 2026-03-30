@@ -7,3 +7,14 @@ vite.config.ts.*
 *.db
 *.db-shm
 *.db-wal
+__pycache__
+*.pyc
+generate_audio.py
+generate_voices.py
+voice_server.py
+voice_countdown.py
+voice_countdown2.py
+voice_countdown3.py
+voice_extra.py
+voice_phases.py
+client/public/music/*.mp3

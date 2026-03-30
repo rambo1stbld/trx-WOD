@@ -1,10 +1,13 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Play, Pause, SkipForward, RotateCcw, ChevronRight, Timer, Flame, Dumbbell } from "lucide-react";
+import { Play, Pause, SkipForward, SkipBack, RotateCcw, ChevronRight, Timer, Flame, Dumbbell } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import StickFigure from "@/components/StickFigure";
+import StickFigure, { PandaFace, LionFace, type AvatarType } from "@/components/StickFigure";
 import { workoutPhases, type Exercise, type WorkoutPhase } from "@/lib/workoutData";
+import { speakExerciseName, speakCue, speakCountdown, speakPhase } from "@/lib/speech";
+import { playBgMusic, stopBgMusic, pauseBgMusic, resumeBgMusic } from "@/lib/bgMusic";
+
 
 type WorkoutState = "idle" | "running" | "paused" | "rest" | "phaseTransition" | "complete";
 
@@ -71,11 +74,54 @@ export default function WorkoutPage() {
     totalElapsed: 0,
   });
   const [exercisesCompleted, setExercisesCompleted] = useState(0);
+
+  const [avatar, setAvatar] = useState<AvatarType>("panda");
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const audioRef = useRef<AudioContext | null>(null);
 
   const currentPhase = workoutPhases[timer.phaseIndex];
   const currentExercise = currentPhase?.exercises[timer.exerciseIndex];
+
+  // Background music per phase
+  useEffect(() => {
+    if (workoutState === "running" || workoutState === "rest") {
+      if (timer.phaseIndex === 0) {
+        playBgMusic("warmup.mp3", 0.25);
+      } else if (timer.phaseIndex === 1) {
+        playBgMusic(["block1-1.mp3", "block1-2.mp3", "block1-3.mp3", "block1-4.mp3", "block1-5.mp3", "block1-6.mp3"], 0.25);
+      } else if (timer.phaseIndex === 2) {
+        playBgMusic(["block2-1.mp3", "block2-2.mp3", "block2-3.mp3", "block2-4.mp3", "block2-5.mp3", "block2-6.mp3"], 0.25);
+      } else if (timer.phaseIndex === 3) {
+        playBgMusic(["block3-1.mp3", "block3-2.mp3", "block3-3.mp3", "block3-4.mp3", "block3-5.mp3", "block3-6.mp3", "block3-7.mp3"], 0.25);
+      } else if (timer.phaseIndex === 4) {
+        playBgMusic(["block4-1.mp3", "block4-2.mp3", "block4-3.mp3", "block4-4.mp3", "block4-5.mp3", "block4-6.mp3"], 0.25);
+      } else if (timer.phaseIndex === 5) {
+        playBgMusic(["cooldown-1.mp3", "cooldown-2.mp3", "cooldown-3.mp3", "cooldown-4.mp3"], 0.2);
+      } else {
+        stopBgMusic();
+      }
+    } else if (workoutState === "paused") {
+      pauseBgMusic();
+    } else {
+      stopBgMusic();
+    }
+  }, [workoutState, timer.phaseIndex]);
+
+  // Cleanup music on unmount
+  useEffect(() => {
+    return () => { stopBgMusic(); };
+  }, []);
+
+  // Announce exercise name when a new exercise starts
+  useEffect(() => {
+    if (
+      workoutState === "running" &&
+      !timer.isRest &&
+      currentExercise
+    ) {
+      speakExerciseName(currentExercise.name, currentExercise.id);
+    }
+  }, [timer.phaseIndex, timer.exerciseIndex, timer.roundIndex, timer.isRest]);
 
   const playBeep = useCallback((freq: number = 800, dur: number = 150) => {
     try {
@@ -199,8 +245,10 @@ export default function WorkoutPage() {
         return { ...prev, timeRemaining: 0, totalElapsed: prev.totalElapsed + 1 };
       }
 
-      if (prev.timeRemaining <= 4 && prev.timeRemaining > 1) {
-        playBeep(500, 80);
+      // Drill sergeant countdown at key marks (not rest)
+      const nextTime = prev.timeRemaining - 1;
+      if (!prev.isRest && [40, 30, 20, 15, 10, 5, 4, 3, 2, 1].includes(nextTime)) {
+        speakCountdown(nextTime);
       }
 
       return {
@@ -225,9 +273,10 @@ export default function WorkoutPage() {
     };
   }, [workoutState, tick]);
 
-  // Auto-resume after phase transition
+  // Auto-resume after phase transition + announce phase
   useEffect(() => {
     if (workoutState === "phaseTransition") {
+      speakPhase(timer.phaseIndex);
       const timeout = setTimeout(() => {
         setWorkoutState("running");
       }, 3000);
@@ -248,6 +297,13 @@ export default function WorkoutPage() {
     setExercisesCompleted(0);
     setWorkoutState("running");
     playBeep(1200, 200);
+    // Announce warm-up phase, then first exercise
+    setTimeout(() => {
+      speakPhase(0);
+    }, 300);
+    setTimeout(() => {
+      speakExerciseName(firstPhase.exercises[0].name, firstPhase.exercises[0].id);
+    }, 2000);
   };
 
   const togglePause = () => {
@@ -261,6 +317,85 @@ export default function WorkoutPage() {
   const skipExercise = () => {
     advanceToNext();
   };
+
+  const goBackExercise = useCallback(() => {
+    setTimer((prev) => {
+      // If more than 3 seconds into the current exercise, just restart it
+      const phase = workoutPhases[prev.phaseIndex];
+      if (!phase) return prev;
+
+      const currentDuration = prev.isRest
+        ? phase.restTime
+        : (phase.workTime || phase.exercises[prev.exerciseIndex]?.duration || 0);
+
+      if (currentDuration - prev.timeRemaining > 3 && !prev.isRest) {
+        return {
+          ...prev,
+          timeRemaining: phase.workTime || phase.exercises[prev.exerciseIndex]?.duration || 0,
+        };
+      }
+
+      // If in rest, go back to the current exercise (the one that just finished)
+      if (prev.isRest) {
+        setExercisesCompleted((c) => Math.max(0, c - 1));
+        return {
+          ...prev,
+          timeRemaining: phase.workTime || phase.exercises[prev.exerciseIndex]?.duration || 0,
+          isRest: false,
+        };
+      }
+
+      // Go to previous exercise
+      const prevExIndex = prev.exerciseIndex - 1;
+
+      if (prevExIndex >= 0) {
+        setExercisesCompleted((c) => Math.max(0, c - 1));
+        return {
+          ...prev,
+          exerciseIndex: prevExIndex,
+          timeRemaining: phase.workTime || phase.exercises[prevExIndex]?.duration || 0,
+          isRest: false,
+        };
+      }
+
+      // At the start of a round — go to previous round's last exercise
+      const prevRound = prev.roundIndex - 1;
+      if (prevRound >= 0) {
+        const lastExIndex = phase.exercises.length - 1;
+        setExercisesCompleted((c) => Math.max(0, c - 1));
+        return {
+          ...prev,
+          roundIndex: prevRound,
+          exerciseIndex: lastExIndex,
+          timeRemaining: phase.workTime || phase.exercises[lastExIndex]?.duration || 0,
+          isRest: false,
+        };
+      }
+
+      // At the start of a phase — go to previous phase's last exercise
+      const prevPhaseIndex = prev.phaseIndex - 1;
+      if (prevPhaseIndex >= 0) {
+        const pp = workoutPhases[prevPhaseIndex];
+        const lastRound = pp.rounds - 1;
+        const lastExIndex = pp.exercises.length - 1;
+        setExercisesCompleted((c) => Math.max(0, c - 1));
+        return {
+          ...prev,
+          phaseIndex: prevPhaseIndex,
+          roundIndex: lastRound,
+          exerciseIndex: lastExIndex,
+          timeRemaining: pp.workTime || pp.exercises[lastExIndex]?.duration || 0,
+          isRest: false,
+        };
+      }
+
+      // Already at the very beginning — just restart first exercise
+      return {
+        ...prev,
+        timeRemaining: phase.workTime || phase.exercises[0]?.duration || 0,
+      };
+    });
+  }, []);
 
   const resetWorkout = () => {
     setWorkoutState("idle");
@@ -293,7 +428,7 @@ export default function WorkoutPage() {
               <h1 className="text-xl font-bold tracking-tight">TRX WOD</h1>
             </div>
             <p className="text-muted-foreground text-sm">
-              50 minutes &middot; 24 exercises &middot; 6 phases
+              50 minutes &middot; 27 exercises &middot; 6 phases
             </p>
           </motion.div>
 
@@ -336,11 +471,37 @@ export default function WorkoutPage() {
             })}
           </div>
 
+          {/* Avatar selection */}
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.45 }}
+            className="mb-8"
+          >
+            <p className="text-xs text-muted-foreground text-center mb-3">Choose your avatar</p>
+            <div className="flex justify-center gap-4">
+              {(["panda", "lion"] as AvatarType[]).map((a) => (
+                <button
+                  key={a}
+                  onClick={() => setAvatar(a)}
+                  className={`w-20 h-20 rounded-2xl border-2 transition-all p-2 ${
+                    avatar === a
+                      ? "border-primary bg-primary/10 scale-105"
+                      : "border-transparent bg-card hover:bg-secondary/50"
+                  }`}
+                  data-testid={`button-avatar-${a}`}
+                >
+                  {a === "panda" ? <PandaFace /> : <LionFace />}
+                </button>
+              ))}
+            </div>
+          </motion.div>
+
           {/* Start button */}
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.5 }}
+            transition={{ delay: 0.55 }}
             className="text-center"
           >
             <Button
@@ -488,6 +649,7 @@ export default function WorkoutPage() {
                     frames={currentExercise.animation}
                     isPlaying={workoutState === "running"}
                     speed={currentExercise.id === "plank" || currentExercise.focus === "Stretch" ? 2400 : 1200}
+                    avatar={avatar}
                   />
                 )}
 
@@ -510,15 +672,25 @@ export default function WorkoutPage() {
         </div>
 
         {/* Controls */}
-        <div className="flex items-center justify-center gap-4 pb-6 pt-4">
+        <div className="flex items-center justify-center gap-3 pb-6 pt-4">
+          <Button
+            variant="outline"
+            size="icon"
+            className="w-10 h-10 rounded-full"
+            onClick={resetWorkout}
+            data-testid="button-reset"
+          >
+            <RotateCcw className="w-4 h-4" />
+          </Button>
+
           <Button
             variant="outline"
             size="icon"
             className="w-12 h-12 rounded-full"
-            onClick={resetWorkout}
-            data-testid="button-reset"
+            onClick={goBackExercise}
+            data-testid="button-back"
           >
-            <RotateCcw className="w-5 h-5" />
+            <SkipBack className="w-5 h-5" />
           </Button>
 
           <Button
